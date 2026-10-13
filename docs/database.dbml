@@ -1,0 +1,348 @@
+Project BorrowHub {
+  database_type: 'PostgreSQL-compatible logical model'
+  Note: 'MVP relational model. Exact DBMS is not specified in PRD; cross-row and temporal rules require transactional application/database enforcement.'
+}
+
+Enum user_affiliation {
+  student
+  staff
+  unknown
+}
+
+Enum user_status {
+  active
+  disabled
+}
+
+Enum role_code {
+  borrower
+  equipment_manager
+  system_administrator
+}
+
+Enum unit_scope_type {
+  campus
+  faculty
+  department
+  other
+}
+
+Enum asset_operational_status {
+  available
+  maintenance
+  unavailable
+  lost
+  retired
+}
+
+Enum loan_request_status {
+  pending_review
+  approved
+  rejected
+  cancelled
+  expired
+  checked_out
+  returned
+  overdue
+}
+
+Enum inspection_result {
+  good
+  damaged
+  incomplete_or_missing
+}
+
+Enum fine_status {
+  unpaid
+  paid
+}
+
+Enum notification_type {
+  request_submitted
+  request_approved
+  request_rejected
+  request_expired
+  request_cancelled
+  overdue_reminder
+  fine_created
+  fine_paid
+}
+
+Enum audit_actor_kind {
+  user
+  system
+}
+
+Enum audit_entity_type {
+  user
+  organizational_unit
+  equipment_category
+  equipment_type
+  asset_unit
+  loan_request
+  asset_assignment
+  return_inspection
+  fine
+  notification
+  operating_calendar
+}
+
+Table users {
+  user_id uuid [pk]
+  sso_subject varchar(255) [not null, unique, note: 'Stable subject identifier from university SSO; do not use email as the immutable key.']
+  display_name varchar(200) [not null]
+  affiliation user_affiliation [not null, default: 'unknown']
+  status user_status [not null, default: 'active']
+  created_at timestamptz [not null]
+  updated_at timestamptz [not null]
+}
+
+Table roles {
+  role_id smallint [pk]
+  code role_code [not null, unique]
+  description varchar(255)
+}
+
+Table user_roles {
+  user_id uuid [not null]
+  role_id smallint [not null]
+  assigned_at timestamptz [not null]
+  assigned_by_user_id uuid [note: 'Null only for controlled system/bootstrap assignment.']
+
+  indexes {
+    (user_id, role_id) [pk]
+  }
+}
+
+Table organizational_units {
+  unit_id uuid [pk]
+  parent_unit_id uuid [note: 'Self-reference supports campus > faculty > department when needed.']
+  unit_type unit_scope_type [not null]
+  unit_name varchar(200) [not null]
+  is_active boolean [not null, default: true]
+  created_at timestamptz [not null]
+
+  indexes {
+    (parent_unit_id, unit_name) [unique]
+  }
+}
+
+Table manager_scope_assignments {
+  manager_user_id uuid [not null]
+  unit_id uuid [not null]
+  assigned_by_user_id uuid [not null]
+  assigned_at timestamptz [not null]
+  is_active boolean [not null, default: true]
+
+  indexes {
+    (manager_user_id, unit_id) [pk]
+  }
+}
+
+Table equipment_categories {
+  category_id uuid [pk]
+  category_name varchar(100) [not null, unique]
+  created_at timestamptz [not null]
+}
+
+Table equipment_types {
+  equipment_type_id uuid [pk]
+  category_id uuid [not null]
+  type_name varchar(200) [not null, unique]
+  is_active boolean [not null, default: true]
+  created_at timestamptz [not null]
+  updated_at timestamptz [not null]
+
+  Note: 'Catalog count and availability are derived from asset_units and active loan assignments; do not store duplicate counts here.'
+}
+
+Table asset_units {
+  asset_unit_id uuid [pk]
+  equipment_type_id uuid [not null]
+  unit_id uuid [not null, note: 'Operational inventory scope owning this physical unit.']
+  asset_tag varchar(120) [not null, unique, note: 'Unique per physical asset.']
+  operational_status asset_operational_status [not null, default: 'available']
+  created_at timestamptz [not null]
+  updated_at timestamptz [not null]
+}
+
+Table operating_calendars {
+  calendar_id uuid [pk]
+  unit_id uuid [not null, unique]
+  timezone_name varchar(100) [not null, note: 'IANA time-zone identifier; official university zone is an open question.']
+  is_active boolean [not null, default: true]
+  updated_by_user_id uuid [not null]
+  updated_at timestamptz [not null]
+}
+
+Table calendar_weekly_hours {
+  weekly_hours_id uuid [pk]
+  calendar_id uuid [not null]
+  weekday smallint [not null, note: 'Convention: 1-7; confirm locale/week-start convention.']
+  opens_at time [not null]
+  closes_at time [not null]
+
+  indexes {
+    (calendar_id, weekday, opens_at) [unique]
+  }
+}
+
+Table calendar_holidays {
+  holiday_id uuid [pk]
+  calendar_id uuid [not null]
+  holiday_date date [not null]
+  holiday_name varchar(200) [not null]
+  created_at timestamptz [not null]
+
+  indexes {
+    (calendar_id, holiday_date) [unique]
+  }
+}
+
+Table loan_requests {
+  loan_request_id uuid [pk]
+  borrower_user_id uuid [not null]
+  equipment_type_id uuid [not null]
+  unit_id uuid [not null, note: 'Scope used to route request and enforce manager access; user-facing scope selection is not yet defined.']
+  requested_quantity smallint [not null]
+  pickup_at timestamptz [not null]
+  due_at timestamptz [not null]
+  status loan_request_status [not null, default: 'pending_review']
+  submitted_at timestamptz [not null]
+  decision_by_user_id uuid [note: 'Equipment manager who approved/rejected; null while pending or for automatic expiry.']
+  decision_at timestamptz
+  cancelled_at timestamptz
+  closed_at timestamptz
+  created_at timestamptz [not null]
+  updated_at timestamptz [not null]
+
+  indexes {
+    (borrower_user_id, status)
+    (unit_id, status, pickup_at, due_at)
+    (equipment_type_id, status, pickup_at, due_at)
+  }
+
+  Note: 'One request covers one equipment type and quantity, matching the interview. If a request may contain multiple types, add normalized loan_request_items.'
+}
+
+Table asset_assignments {
+  asset_assignment_id uuid [pk]
+  loan_request_id uuid [not null]
+  asset_unit_id uuid [not null]
+  assigned_by_user_id uuid [not null]
+  assigned_at timestamptz [not null]
+  handover_at timestamptz
+  handed_over_by_user_id uuid
+  returned_at timestamptz
+  returned_by_user_id uuid
+
+  indexes {
+    (loan_request_id, asset_unit_id) [unique]
+    (asset_unit_id, returned_at)
+    (loan_request_id, returned_at)
+  }
+
+  Note: 'One row per physical unit assigned to a request. Temporal non-overlap and only-one-current-assignment rules require transactional enforcement.'
+}
+
+Table return_inspections {
+  return_inspection_id uuid [pk]
+  asset_assignment_id uuid [not null, unique]
+  result inspection_result [not null]
+  inspected_by_user_id uuid [not null]
+  inspected_at timestamptz [not null]
+  notes text [note: 'Optional operational note; avoid storing sensitive or unnecessary personal data.']
+
+  Note: 'The current final asset status remains on asset_units; inspection history records the observed return result.'
+}
+
+Table fines {
+  fine_id uuid [pk]
+  loan_request_id uuid [not null, unique, note: 'At most one fine per overdue loan.']
+  amount numeric(10,2) [not null, default: 50.00]
+  currency char(3) [not null, default: 'USD']
+  status fine_status [not null, default: 'unpaid']
+  issued_at timestamptz [not null]
+  paid_at timestamptz
+  recorded_paid_by_user_id uuid
+  created_at timestamptz [not null]
+  updated_at timestamptz [not null]
+
+  Note: 'Payment is recorded manually in MVP; this table does not store payment-card or gateway data.'
+}
+
+Table notifications {
+  notification_id uuid [pk]
+  recipient_user_id uuid [not null]
+  loan_request_id uuid [not null]
+  fine_id uuid
+  notification_type notification_type [not null]
+  created_at timestamptz [not null]
+  read_at timestamptz
+
+  indexes {
+    (recipient_user_id, read_at, created_at)
+    (loan_request_id, notification_type, created_at)
+  }
+
+  Note: 'In-app only. Request is the primary context; fine_id is populated for fine-related notifications.'
+}
+
+Table audit_events {
+  audit_event_id uuid [pk]
+  actor_kind audit_actor_kind [not null]
+  actor_user_id uuid [note: 'Null for system-generated events; non-null for user-generated events.']
+  action_code varchar(100) [not null]
+  entity_type audit_entity_type [not null]
+  entity_id uuid [not null, note: 'Polymorphic target identifier; see review for referential-integrity trade-off.']
+  old_values jsonb
+  new_values jsonb
+  occurred_at timestamptz [not null]
+
+  indexes {
+    (entity_type, entity_id, occurred_at)
+    (actor_user_id, occurred_at)
+    (action_code, occurred_at)
+  }
+}
+
+Ref: user_roles.user_id > users.user_id
+Ref: user_roles.role_id > roles.role_id
+Ref: user_roles.assigned_by_user_id > users.user_id
+
+Ref: organizational_units.parent_unit_id > organizational_units.unit_id
+Ref: manager_scope_assignments.manager_user_id > users.user_id
+Ref: manager_scope_assignments.unit_id > organizational_units.unit_id
+Ref: manager_scope_assignments.assigned_by_user_id > users.user_id
+
+Ref: equipment_types.category_id > equipment_categories.category_id
+Ref: asset_units.equipment_type_id > equipment_types.equipment_type_id
+Ref: asset_units.unit_id > organizational_units.unit_id
+
+Ref: operating_calendars.unit_id > organizational_units.unit_id
+Ref: operating_calendars.updated_by_user_id > users.user_id
+Ref: calendar_weekly_hours.calendar_id > operating_calendars.calendar_id
+Ref: calendar_holidays.calendar_id > operating_calendars.calendar_id
+
+Ref: loan_requests.borrower_user_id > users.user_id
+Ref: loan_requests.equipment_type_id > equipment_types.equipment_type_id
+Ref: loan_requests.unit_id > organizational_units.unit_id
+Ref: loan_requests.decision_by_user_id > users.user_id
+
+Ref: asset_assignments.loan_request_id > loan_requests.loan_request_id
+Ref: asset_assignments.asset_unit_id > asset_units.asset_unit_id
+Ref: asset_assignments.assigned_by_user_id > users.user_id
+Ref: asset_assignments.handed_over_by_user_id > users.user_id
+Ref: asset_assignments.returned_by_user_id > users.user_id
+
+Ref: return_inspections.asset_assignment_id > asset_assignments.asset_assignment_id
+Ref: return_inspections.inspected_by_user_id > users.user_id
+
+Ref: fines.loan_request_id > loan_requests.loan_request_id
+Ref: fines.recorded_paid_by_user_id > users.user_id
+
+Ref: notifications.recipient_user_id > users.user_id
+Ref: notifications.loan_request_id > loan_requests.loan_request_id
+Ref: notifications.fine_id > fines.fine_id
+
+Ref: audit_events.actor_user_id > users.user_id
